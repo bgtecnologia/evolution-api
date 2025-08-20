@@ -316,11 +316,15 @@ export class ChatwootService {
           data['phone_number'] = `+${phoneNumber}`;
         }
       } else {
+        // For WhatsApp groups, don't set phone_number to avoid E.164 validation errors
+        // Groups don't have valid E.164 phone numbers, use full JID as identifier
+        const identifier = jid && jid.includes('@') ? jid : phoneNumber;
         data = {
           inbox_id: inboxId,
-          name: name || phoneNumber,
-          identifier: phoneNumber,
+          name: name || identifier,
+          identifier: identifier,
           avatar_url: avatar_url,
+          // Intentionally omit phone_number for groups
         };
       }
 
