@@ -326,6 +326,7 @@ export class ChatwootService {
           avatar_url: avatar_url,
           // Intentionally omit phone_number for groups
         };
+        this.logger.warn(`Chatwoot createContact: Skipping phone_number for group ${identifier} to prevent E.164 validation error`);
       }
 
       const contact = await client.contacts.create({
@@ -592,10 +593,20 @@ export class ChatwootService {
           this.logger.verbose(
             `Identifier needs update: (contact.identifier: ${contact.identifier}, body.key.remoteJid: ${body.key.remoteJid}, body.key.senderPn: ${body.key.senderPn}`,
           );
-          const updateContact = await this.updateContact(instance, contact.id, {
+          
+          // Check if it's a group to avoid setting phone_number for groups (E.164 validation error)
+          const isGroup = body.key.senderPn.includes('@g.us');
+          const updateData: any = {
             identifier: body.key.senderPn,
-            phone_number: `+${body.key.senderPn.split('@')[0]}`,
-          });
+          };
+          
+          if (!isGroup) {
+            updateData.phone_number = `+${body.key.senderPn.split('@')[0]}`;
+          } else {
+            this.logger.warn(`Chatwoot updateContact: Skipping phone_number for group ${body.key.senderPn} to prevent E.164 validation error`);
+          }
+          
+          const updateContact = await this.updateContact(instance, contact.id, updateData);
 
           if (updateContact === null) {
             const baseContact = await this.findContact(instance, body.key.senderPn.split('@')[0]);
