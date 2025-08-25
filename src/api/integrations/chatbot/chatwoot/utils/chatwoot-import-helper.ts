@@ -115,7 +115,14 @@ class ChatwootImport {
           bindInsert.push(contact.pushName);
           const bindName = `$${bindInsert.length}`;
 
-          bindInsert.push(`+${contact.remoteJid.split('@')[0]}`);
+          // determine valid phone number from remoteJid; do NOT set phone_number for groups or invalid numbers
+          const validNumber = this.getNumberFromRemoteJidLocal(contact.remoteJid);
+          if (validNumber) {
+            bindInsert.push(`+${validNumber}`);
+          } else {
+            // push null so the parameter placeholder is preserved and DB will store NULL for phone_number
+            bindInsert.push(null);
+          }
           const bindPhoneNumber = `$${bindInsert.length}`;
 
           bindInsert.push(contact.remoteJid);
@@ -566,6 +573,28 @@ class ChatwootImport {
     const sql = `UPDATE messages SET source_id = $1, status = 0, created_at = NOW(), updated_at = NOW() WHERE id = $2;`;
 
     return pgClient.query(sql, [`WAID:${sourceId}`, messageId]);
+  }
+
+  // Local version of ChatwootService.getNumberFromRemoteJid to validate remoteJid before inserting phone_number
+  private getNumberFromRemoteJidLocal(remoteJid: string): string | null {
+    try {
+      if (!remoteJid || typeof remoteJid !== 'string') return null;
+
+      const withoutSuffix = remoteJid.replace(/:\\d+$/, '');
+      const local = withoutSuffix.split('@')[0] || '';
+
+      const digits = local.replace(/\D/g, '');
+      const normalized = digits.replace(/^0+/, '');
+
+      if (/^[1-9]\d{1,14}$/.test(normalized)) {
+        return normalized;
+      }
+
+      this.logger.debug(`getNumberFromRemoteJidLocal invalid number: ${remoteJid}`);
+      return null;
+    } catch (e) {
+      return null;
+    }
   }
 }
 

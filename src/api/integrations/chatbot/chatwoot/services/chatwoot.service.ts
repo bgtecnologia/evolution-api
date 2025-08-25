@@ -304,6 +304,8 @@ export class ChatwootService {
       }
 
       let data: any = {};
+      // sanitize phoneNumber for phone_number field to avoid passing JIDs (like @g.us) to Chatwoot
+      const sanitizedNumber = this.getNumberFromRemoteJid(phoneNumber);
       if (!isGroup) {
         data = {
           inbox_id: inboxId,
@@ -312,21 +314,17 @@ export class ChatwootService {
           avatar_url: avatar_url,
         };
 
-        if ((jid && jid.includes('@')) || !jid) {
-          data['phone_number'] = `+${phoneNumber}`;
+        // Only include phone_number when sanitizedNumber is valid (getNumberFromRemoteJid returns null when invalid)
+        if (((jid && jid.includes('@')) || !jid) && sanitizedNumber) {
+          data['phone_number'] = `+${sanitizedNumber}`;
         }
       } else {
-        // For WhatsApp groups, don't set phone_number to avoid E.164 validation errors
-        // Groups don't have valid E.164 phone numbers, use full JID as identifier
-        const identifier = jid && jid.includes('@') ? jid : phoneNumber;
         data = {
           inbox_id: inboxId,
-          name: name || identifier,
-          identifier: identifier,
+          name: name || phoneNumber,
+          identifier: phoneNumber,
           avatar_url: avatar_url,
-          // Intentionally omit phone_number for groups
         };
-        this.logger.warn(`Chatwoot createContact: Skipping phone_number for group ${identifier} to prevent E.164 validation error`);
       }
 
       const contact = await client.contacts.create({
@@ -425,11 +423,15 @@ export class ChatwootService {
     }
 
     let query: any;
+    // sanitize input: remove possible jid parts so queries use pure phone numbers for phone_number field
     const isGroup = phoneNumber.includes('@g.us');
+    const sanitized = this.getNumberFromRemoteJid(phoneNumber);
 
     if (!isGroup) {
-      query = `+${phoneNumber}`;
+      // use sanitized number when valid, otherwise fall back to original phoneNumber (will search by identifier)
+      query = sanitized ? `+${sanitized}` : phoneNumber;
     } else {
+      // for groups, keep the full jid when searching by identifier
       query = phoneNumber;
     }
 
@@ -588,28 +590,23 @@ export class ChatwootService {
     try {
       // Processa atualização de contatos já criados @lid
       if (isLid && body.key.senderPn !== body.key.previousRemoteJid) {
-        const contact = await this.findContact(instance, body.key.remoteJid.split('@')[0]);
+        const rawRemote = body.key.remoteJid.split('@')[0];
+        const sanitizedRemote = this.getNumberFromRemoteJid(body.key.remoteJid);
+        const contact = await this.findContact(instance, sanitizedRemote ? sanitizedRemote : rawRemote);
         if (contact && contact.identifier !== body.key.senderPn) {
           this.logger.verbose(
             `Identifier needs update: (contact.identifier: ${contact.identifier}, body.key.remoteJid: ${body.key.remoteJid}, body.key.senderPn: ${body.key.senderPn}`,
           );
-          
-          // Check if it's a group to avoid setting phone_number for groups (E.164 validation error)
-          const isGroup = body.key.senderPn.includes('@g.us');
-          const updateData: any = {
+          const sanitizedPn = this.getNumberFromRemoteJid(body.key.senderPn);
+          const updateContact = await this.updateContact(instance, contact.id, {
             identifier: body.key.senderPn,
-          };
-          
-          if (!isGroup) {
-            updateData.phone_number = `+${body.key.senderPn.split('@')[0]}`;
-          } else {
-            this.logger.warn(`Chatwoot updateContact: Skipping phone_number for group ${body.key.senderPn} to prevent E.164 validation error`);
-          }
-          
-          const updateContact = await this.updateContact(instance, contact.id, updateData);
+            ...(sanitizedPn && { phone_number: `+${sanitizedPn}` }),
+          });
 
           if (updateContact === null) {
-            const baseContact = await this.findContact(instance, body.key.senderPn.split('@')[0]);
+            const rawSender = body.key.senderPn.split('@')[0];
+            const sanitizedSender = this.getNumberFromRemoteJid(body.key.senderPn);
+            const baseContact = await this.findContact(instance, sanitizedSender ? sanitizedSender : rawSender);
             if (baseContact) {
               await this.mergeContacts(baseContact.id, contact.id);
               this.logger.verbose(
@@ -676,12 +673,14 @@ export class ChatwootService {
 
           nameContact = `${group.subject} (GROUP)`;
 
+          const participantRaw = body.key.participant.split('@')[0];
+          const participantSanitized = this.getNumberFromRemoteJid(body.key.participant);
           const picture_url = await this.waMonitor.waInstances[instance.instanceName].profilePicture(
-            body.key.participant.split('@')[0],
+            participantSanitized ? participantSanitized : participantRaw,
           );
           this.logger.verbose(`Participant profile picture URL: ${JSON.stringify(picture_url)}`);
 
-          const findParticipant = await this.findContact(instance, body.key.participant.split('@')[0]);
+          const findParticipant = await this.findContact(instance, participantSanitized ? participantSanitized : participantRaw);
           this.logger.verbose(`Found participant: ${JSON.stringify(findParticipant)}`);
 
           if (findParticipant) {
@@ -694,7 +693,7 @@ export class ChatwootService {
           } else {
             await this.createContact(
               instance,
-              body.key.participant.split('@')[0],
+              participantSanitized ? participantSanitized : participantRaw,
               filterInbox.id,
               false,
               body.pushName,
@@ -2448,8 +2447,21 @@ export class ChatwootService {
     }
   }
 
-  public getNumberFromRemoteJid(remoteJid: string) {
-    return remoteJid.replace(/:\d+/, '').split('@')[0];
+  public getNumberFromRemoteJid(remoteJid: string): string | null {
+    if (!remoteJid || typeof remoteJid !== 'string') return null;
+
+    const withoutSuffix = remoteJid.replace(/:\d+$/, '');
+    const local = withoutSuffix.split('@')[0] || '';
+
+    const digits = local.replace(/\D/g, '');
+    const normalized = digits.replace(/^0+/, '');
+
+    if (/^[1-9]\d{1,14}$/.test(normalized)) {
+      return normalized;
+    }
+
+    this.logger.debug(`getNumberFromRemoteJid invalid number: ${remoteJid}`);
+    return null;
   }
 
   public startImportHistoryMessages(instance: InstanceDto) {
